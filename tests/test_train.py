@@ -3,7 +3,7 @@ import sys
 import tempfile
 import os
 from pathlib import Path
-from typing import Text, Dict
+from typing import Any, Text, Dict
 from unittest.mock import Mock
 
 import pytest
@@ -12,10 +12,10 @@ from _pytest.monkeypatch import MonkeyPatch
 
 import rasa.model
 import rasa.core
+import rasa.nlu
 import rasa.shared.importers.autoconfig as autoconfig
+import rasa.shared.utils.io
 from rasa.core.interpreter import RasaNLUInterpreter
-from rasa.shared.core.domain import Domain
-from rasa.shared.importers.importer import TrainingDataImporter
 
 from rasa.train import train_core, train_nlu, train
 from tests.conftest import DEFAULT_CONFIG_PATH, DEFAULT_NLU_DATA
@@ -358,3 +358,228 @@ def test_train_nlu_autoconfig(
     mocked_get_configuration.assert_called_once()
     _, args, _ = mocked_get_configuration.mock_calls[0]
     assert args[1] == autoconfig.TrainingType.NLU
+
+
+# TODO: fixtures?
+def mock_core_training(monkeypatch):
+    mocked_core_training = Mock()
+
+    async def mocked_train_core(*args: Any, **kwargs: Any) -> Any:
+        mocked_core_training(*args, **kwargs)
+
+    monkeypatch.setattr(
+        rasa.core,
+        rasa.core.train.__name__,
+        mocked_train_core,
+    )
+    return mocked_core_training
+
+
+def mock_nlu_training(monkeypatch):
+    mocked_nlu_training = Mock()
+
+    async def mocked_train_nlu(*args: Any, **kwargs: Any) -> Text:
+        mocked_nlu_training(*args, **kwargs)
+        return ""
+
+    monkeypatch.setattr(
+        rasa.nlu,
+        rasa.nlu.train.__name__,
+        mocked_train_nlu,
+    )
+    return mocked_nlu_training
+
+
+class TestE2e:
+    def test_models_not_retrained_if_no_new_data(
+        self,
+        monkeypatch: MonkeyPatch,
+        trained_e2e_model: Text,
+        default_domain_path,
+        default_stack_config,
+        default_e2e_stories_file,
+        default_nlu_data,
+    ):
+        mocked_nlu_training = mock_nlu_training(monkeypatch)
+        mocked_core_training = mock_core_training(monkeypatch)
+
+        train(
+            default_domain_path,
+            default_stack_config,
+            [default_e2e_stories_file, default_nlu_data],
+            output=trained_e2e_model,
+        )
+
+        mocked_core_training.assert_not_called()
+        mocked_nlu_training.assert_not_called()
+
+    def test_retrains_nlu_and_core_if_new_e2e_example(
+        self,
+        monkeypatch: MonkeyPatch,
+        trained_e2e_model: Text,
+        default_domain_path,
+        default_stack_config,
+        default_e2e_stories_file,
+        default_nlu_data,
+    ):
+        stories_yaml = rasa.shared.utils.io.read_yaml_file(default_e2e_stories_file)
+        stories_yaml["stories"][1]["steps"].append({"user": "new message!"})
+
+        new_stories_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yml").name
+
+        rasa.shared.utils.io.write_yaml(stories_yaml, new_stories_file)
+
+        mocked_nlu_training = mock_nlu_training(monkeypatch)
+        mocked_core_training = mock_core_training(monkeypatch)
+
+        train(
+            default_domain_path,
+            default_stack_config,
+            [new_stories_file, default_nlu_data],
+            output=trained_e2e_model,
+        )
+
+        mocked_core_training.assert_called_once()
+        mocked_nlu_training.assert_called_once()
+
+    def test_retrains_only_core_if_new_e2e_example_seen_before(
+        self,
+        monkeypatch: MonkeyPatch,
+        trained_e2e_model: Text,
+        default_domain_path,
+        default_stack_config,
+        default_e2e_stories_file,
+        default_nlu_data,
+    ):
+        stories_yaml = rasa.shared.utils.io.read_yaml_file(default_e2e_stories_file)
+        stories_yaml["stories"][1]["steps"].append({"user": "Yes"})
+
+        new_stories_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yml").name
+
+        rasa.shared.utils.io.write_yaml(stories_yaml, new_stories_file)
+
+        mocked_nlu_training = mock_nlu_training(monkeypatch)
+        mocked_core_training = mock_core_training(monkeypatch)
+
+        train(
+            default_domain_path,
+            default_stack_config,
+            [new_stories_file, default_nlu_data],
+            output=trained_e2e_model,
+        )
+
+        mocked_core_training.assert_called_once()
+        mocked_nlu_training.assert_not_called()
+
+    def test_nlu_and_core_trained_if_no_nlu_data_but_e2e_stories(
+        self,
+        monkeypatch: MonkeyPatch,
+        default_domain_path,  # TODO: types everywhere
+        default_stack_config,
+        default_e2e_stories_file,
+        tmp_path,
+    ):
+
+        mocked_nlu_training = mock_nlu_training(monkeypatch)
+        mocked_core_training = mock_core_training(monkeypatch)
+
+        (tmp_path / "models").mkdir()
+        output = str(tmp_path / "models")
+        train(
+            default_domain_path,
+            default_stack_config,
+            [default_e2e_stories_file],
+            output=output,
+        )
+
+        mocked_core_training.assert_called_once()
+        mocked_nlu_training.assert_called_once()
+
+    def test_new_nlu_data_retrains_core_if_there_are_e2e_stories(
+        self,
+        monkeypatch: MonkeyPatch,
+        trained_e2e_model: Text,
+        default_domain_path,
+        default_stack_config,
+        default_e2e_stories_file,
+        default_nlu_data,
+    ):
+        nlu_yaml = rasa.shared.utils.io.read_yaml_file(default_nlu_data)
+        nlu_yaml["nlu"][0]["examples"] += "- surprise!\n"
+
+        new_nlu_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yml").name
+
+        rasa.shared.utils.io.write_yaml(nlu_yaml, new_nlu_file)
+
+        mocked_nlu_training = mock_nlu_training(monkeypatch)
+        mocked_core_training = mock_core_training(monkeypatch)
+
+        train(
+            default_domain_path,
+            default_stack_config,
+            [default_e2e_stories_file, new_nlu_file],
+            output=trained_e2e_model,
+        )
+
+        mocked_core_training.assert_called_once()
+        mocked_nlu_training.assert_called_once()
+
+    def test_new_nlu_data_does_not_retrain_core_if_there_are_no_e2e_stories(
+        self,
+        monkeypatch: MonkeyPatch,
+        trained_simple_rasa_model: Text,
+        default_domain_path,
+        default_stack_config,
+        simple_stories_file,
+        default_nlu_data,
+    ):
+        nlu_yaml = rasa.shared.utils.io.read_yaml_file(default_nlu_data)
+        nlu_yaml["nlu"][0]["examples"] += "- surprise!\n"
+
+        new_nlu_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yml").name
+
+        rasa.shared.utils.io.write_yaml(nlu_yaml, new_nlu_file)
+
+        mocked_nlu_training = mock_nlu_training(monkeypatch)
+        mocked_core_training = mock_core_training(monkeypatch)
+
+        train(
+            default_domain_path,
+            default_stack_config,
+            [new_nlu_file, simple_stories_file],
+            output=trained_simple_rasa_model,
+        )
+
+        mocked_core_training.assert_not_called()
+        mocked_nlu_training.assert_called_once()
+
+    def test_training_core_with_e2e_fails_gracefully(
+        self,
+        capsys: CaptureFixture,
+        monkeypatch: MonkeyPatch,
+        tmp_path,
+        default_domain_path,
+        default_stack_config,
+        default_e2e_stories_file,
+    ):
+
+        mocked_nlu_training = mock_nlu_training(monkeypatch)
+        mocked_core_training = mock_core_training(monkeypatch)
+
+        (tmp_path / "models").mkdir()
+        output = str(tmp_path / "models")
+        train_core(
+            default_domain_path,
+            default_stack_config,
+            default_e2e_stories_file,
+            output=output,
+        )
+
+        mocked_core_training.assert_not_called()
+        mocked_nlu_training.assert_not_called()
+
+        captured = capsys.readouterr()
+        assert (
+            "Stories file contains e2e stories. "
+            + "Please train using `rasa train` so that the NLU model is also trained."
+        ) in captured.out

@@ -50,7 +50,7 @@ class StoryReader:
         self.current_step_builder: Optional[StoryStepBuilder] = None
         self.domain = domain
         self.template_variables = template_vars if template_vars else {}
-        self.use_e2e = use_e2e
+        self.use_e2e = use_e2e  # TODO: change name
         self.source_name = source_name
         self._is_used_for_training = is_used_for_training
         self._is_parsing_conditions = False

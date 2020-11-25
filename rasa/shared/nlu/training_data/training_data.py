@@ -668,7 +668,8 @@ class TrainingData:
         ]
         return not any([len(lst) > 0 for lst in lists_to_check])
 
-    def can_train_nlu_model(self) -> bool:
+    # TODO: rename
+    def can_not_train_nlu_model(self) -> bool:
         """Checks if any NLU training data was loaded."""
         lists_to_check = [
             self.nlu_examples,
@@ -677,6 +678,9 @@ class TrainingData:
             self.lookup_tables,
         ]
         return not any([len(lst) > 0 for lst in lists_to_check])
+
+    def has_e2e_examples(self):
+        return any(message.is_e2e_message() for message in self.training_examples)
 
 
 def list_to_str(lst: List[Text], delim: Text = ", ", quote: Text = "'") -> Text:
